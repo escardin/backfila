@@ -98,6 +98,9 @@ message RunBatchRequest {
 
   // Provided data from the source backfill if this is the target backfill in a pipelined backfill.
   optional PipelinedData pipelined_data = 7;
+
+  // Provided data from the backfila client allowing this request to continue this batch.
+  optional bytes partial_batch_bookmark = 8;
 }
 message RunBatchResponse {
   // How much to sleep before starting new batches. For example can be set to replication lag.
@@ -105,7 +108,14 @@ message RunBatchResponse {
 
   optional PipelinedData pipelined_data = 2;
 
+  // Stacktrace that will be surfaced to the user.
+  // If this is provided this batch request is assumed to have failed.
   optional string exception_stack_trace = 3;
+
+  // Provided data from the backfila client telling the next invocation how to continue.
+  // Allows the client to return even if a batch is not done.
+  // If this is provided this batch request is considered incomplete.
+  optional bytes partial_batch_bookmark = 8;
 }
 
 // Pipelined data can be any format as long as both the consumer and provider agree on it.

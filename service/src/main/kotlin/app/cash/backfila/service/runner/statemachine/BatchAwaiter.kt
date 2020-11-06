@@ -1,5 +1,6 @@
 package app.cash.backfila.service.runner.statemachine
 
+import app.cash.backfila.protos.clientservice.GetNextBatchRangeResponse
 import app.cash.backfila.protos.clientservice.RunBatchResponse
 import app.cash.backfila.service.persistence.BackfillState
 import app.cash.backfila.service.persistence.DbEventLog
@@ -14,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import misk.hibernate.load
 import misk.logging.getLogger
+import okio.ByteString
 
 class BatchAwaiter(
   private val backfillRunner: BackfillRunner,
@@ -42,8 +44,7 @@ class BatchAwaiter(
 
       // Repeat this batch until it succeeds.
       retry@ while (true) {
-        var retry: Deferred<RunBatchResponse>? = null
-        try {
+        val nextRequest: Deferred<RunBatchResponse> = try {
           val response: RunBatchResponse = runBatchRpc.await()
 
           if (response.exception_stack_trace != null) {
@@ -57,6 +58,32 @@ class BatchAwaiter(
               backfillRunner.runBatchBackoff.addMillis(backfillRunner.metadata.extraSleepMs)
             }
           }
+
+          if (response.partial_batch_bookmark != null) {
+            // We have a partial batch bookmark, continue the batch.
+            backoffAndSendRunBatchAsync(batch, response.partial_batch_bookmark
+            ) { "${backfillRunner.logLabel()} continuing partial runbatch for $batch" }
+          } else {
+            // We got a 200 response on the batch with no error or partial bookmark. This batch is
+            // done.
+            logger.info { "Runbatch finished for ${backfillRunner.logLabel()} $batch" }
+
+            backfillRunner.onRpcSuccess()
+
+            matchingRateCounter.add(batch.matching_record_count)
+            scannedRateCounter.add(batch.scanned_record_count)
+            // Track our progress in DB for when another runner takes over.
+            // TODO update this less often, probably in the lease updater task
+            backfillRunner.factory.transacter.transaction { session ->
+              val dbRunPartition = session.load(backfillRunner.partitionId)
+              dbRunPartition.pkey_cursor = batch.batch_range.end
+              dbRunPartition.backfilled_scanned_record_count += batch.scanned_record_count
+              dbRunPartition.backfilled_matching_record_count += batch.matching_record_count
+              dbRunPartition.scanned_records_per_minute = scannedRateCounter.projectedRate()
+              dbRunPartition.matching_records_per_minute = matchingRateCounter.projectedRate()
+            }
+            break@retry
+          }
         } catch (e: CancellationException) {
           logger.info(e) { "BatchAwaiter job cancelled ${backfillRunner.logLabel()}" }
           break@main
@@ -69,46 +96,38 @@ class BatchAwaiter(
               Duration.between(startedAt, backfillRunner.factory.clock.instant())
           )
 
-          // After backing off retry.
-          if (backfillRunner.globalBackoff.backingOff()) {
-            val backoffMs = backfillRunner.globalBackoff.backoffMs()
-            logger.info {
-              "BatchAwaiter ${backfillRunner.logLabel()} backing off for $backoffMs ms"
-            }
-            delay(backoffMs)
-          }
-          retry = backfillRunner.runBatchAsync(this, batch)
+          backoffAndSendRunBatchAsync(
+              batch) { "${backfillRunner.logLabel()} running runbatch retry for $batch" }
         }
 
-        // If we haven't attempted a retry this iteration then the batch must be completed.
-        if (retry == null) {
-          logger.info { "Runbatch finished for ${backfillRunner.logLabel()} $batch" }
-
-          backfillRunner.onRpcSuccess()
-
-          matchingRateCounter.add(batch.matching_record_count)
-          scannedRateCounter.add(batch.scanned_record_count)
-          // Track our progress in DB for when another runner takes over.
-          // TODO update this less often, probably in the lease updater task
-          backfillRunner.factory.transacter.transaction { session ->
-            val dbRunPartition = session.load(backfillRunner.partitionId)
-            dbRunPartition.pkey_cursor = batch.batch_range.end
-            dbRunPartition.backfilled_scanned_record_count += batch.scanned_record_count
-            dbRunPartition.backfilled_matching_record_count += batch.matching_record_count
-            dbRunPartition.scanned_records_per_minute = scannedRateCounter.projectedRate()
-            dbRunPartition.matching_records_per_minute = matchingRateCounter.projectedRate()
-          }
-          break@retry
-        }
-
-        runBatchRpc = retry
+        runBatchRpc = nextRequest
+        // Reset the started clock for the next request
         startedAt = backfillRunner.factory.clock.instant()
-        logger.info { "${backfillRunner.logLabel()} running runbatch retry for $batch" }
       }
 
       // Signal to the rpc sender that there is more capacity to send rpcs.
       rpcBackpressureChannel.receive()
     }
+  }
+
+  private suspend fun CoroutineScope.backoffAndSendRunBatchAsync(
+    batch: GetNextBatchRangeResponse.Batch,
+    partialBatchBookmark: ByteString? = null,
+    onRunMsg: () -> Any?
+  ): Deferred<RunBatchResponse> {
+    // After backing off then run the request.
+    if (backfillRunner.globalBackoff.backingOff()) {
+      val backoffMs = backfillRunner.globalBackoff.backoffMs()
+      logger.info {
+        "BatchAwaiter ${backfillRunner.logLabel()} backing off for $backoffMs ms"
+      }
+      delay(backoffMs)
+    }
+    logger.info(onRunMsg)
+    return backfillRunner.runBatchAsync(
+        this,
+        batch,
+        partialBatchBookmark = partialBatchBookmark)
   }
 
   private fun completePartition() {

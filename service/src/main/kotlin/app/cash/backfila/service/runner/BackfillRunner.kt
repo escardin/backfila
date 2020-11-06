@@ -180,7 +180,8 @@ class BackfillRunner private constructor(
   fun runBatchAsync(
     scope: CoroutineScope,
     batch: GetNextBatchRangeResponse.Batch,
-    pipelinedData: PipelinedData? = null
+    pipelinedData: PipelinedData? = null,
+    partialBatchBookmark: ByteString? = null
   ): Deferred<RunBatchResponse> {
     // Supervisor here allows us to handle the exception, rather than failing the job.
     return scope.async(SupervisorJob()) {
@@ -191,7 +192,8 @@ class BackfillRunner private constructor(
           batch.batch_range,
           metadata.parameters,
           metadata.dryRun,
-          pipelinedData
+          pipelinedData,
+          partialBatchBookmark
       ))
     }
   }
