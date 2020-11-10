@@ -1,0 +1,45 @@
+---
+kind: pipeline
+type: kubernetes
+name: default
+
+steps:
+  - name: compile_and_cache_java
+    image: "gradle:6.5.0-jdk11"
+    environment:
+      ENVIRONMENT: TESTING
+      JVM_OPTS: -Xmx1024M
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=3 -Xmx4096m"
+      TERM: dumb
+    commands:
+      - ./gradlew testClasses --parallel --build-cache
+  - name: test
+    image: "gradle:6.5.0-jdk11"
+    environment:
+      ENVIRONMENT: TESTING
+      JVM_OPTS: -Xmx1024M
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=3 -Xmx4096m"
+      TERM: dumb
+    commands:
+      - ./gradlew build check -i --parallel --build-cache
+    depends_on: compile_and_cache_java
+  - name: node
+    image: circleci/node:10.15
+    commands:
+      npm install -g @misk/cli && miskweb ci-build -e
+  - name: docs
+    image: "python:3.6-buster"
+    commands:
+      - pip install mkdocs mkdocs-material
+      - ./gradlew dokka
+      - cat README.md | grep -v 'project website' > docs/index.md
+      - cp CHANGELOG.md docs/changelog.md
+      - cp RELEASING.md docs/releasing.md
+      - mkdocs build
+services:
+  - name: mysql
+    image: "mysql:5.7"
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: 1
+    entrypoint: [ "mysqld" ]
+    command: [ '--sql-mode=""' ]
