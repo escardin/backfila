@@ -22,7 +22,8 @@ steps:
       TERM: dumb
     commands:
       - ./gradlew build check -i --parallel --build-cache
-    depends_on: compile_and_cache_java
+    depends_on:
+      - compile_and_cache_java
   - name: node
     image: circleci/node:10.15
     commands:
