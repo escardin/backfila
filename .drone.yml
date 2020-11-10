@@ -26,7 +26,7 @@ steps:
   - name: node
     image: circleci/node:10.15
     commands:
-      npm install -g @misk/cli && miskweb ci-build -e
+      - npm install -g @misk/cli && miskweb ci-build -e
 #  - name: docs
 #    image: "python:3.6-buster"
 #    commands:
